@@ -1,0 +1,17 @@
+import matplotlib.pyplot as plt
+print(val_data.columns)
+
+# Vẽ biểu đồ giá với điểm mua
+for stock in stocks:
+    stock_df = val_data[val_data['ticker'] == stock]
+    stock_df['predicted_buy'] = y_pred[val_data['ticker'] == stock]
+    
+    plt.figure(figsize=(12, 6))
+    plt.plot(stock_df['time'], stock_df['close'], label='Close Price', color='blue')
+    plt.scatter(stock_df['time'][stock_df['predicted_buy'] == 1], stock_df['close'][stock_df['predicted_buy'] == 1], color='yellow', label='Buy Signal', marker='o')
+    plt.title(f'Stock Price and Buy Signals - {stock}')
+    plt.xlabel('Time')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.xticks(rotation=45)
+    plt.show()
