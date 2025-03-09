@@ -1,0 +1,183 @@
+# ĐẢM BẢO KHÔNG DATA LEAKAGE, CHIA TỆP DỮ LIỆU, CHẠY XGBOOST KHÁI QUÁT CHO TOÀN BỘ CỔ PHIẾU 
+
+import vnstock
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from bayes_opt import BayesianOptimization
+import datetime as dt
+from vnstock import Vnstock
+import talib
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import log_loss
+from sklearn.metrics import classification_report
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+
+# Danh sách cổ phiếu cần lấy dữ liệu
+stocks =  ['HPG', 'VIB', 'MSN', 'MSH', 'EVF', 'CTG', 'MBB', 'KBC', 'SSI']
+
+def get_stock_data(ticker):
+    vnstock_instance = Vnstock().stock(symbol=ticker, source='VCI')
+    start_date = "2000-01-01"
+    end_date = "2025-01-01"
+    df = vnstock_instance.quote.history(symbol=ticker, start=start_date, end=end_date)
+    df['ticker'] = ticker
+    return df
+
+dataframes = [get_stock_data(stock) for stock in stocks]
+df = pd.concat(dataframes, ignore_index=True)
+
+def compute_indicators(df):
+    df = df[['time', 'close', 'high', 'low', 'volume','ticker']].copy()
+    df['rsi'] = talib.RSI(df['close'], timeperiod=14)
+    df['macd'], df['macd_signal'], _ = talib.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
+    df['sma_10'] = talib.SMA(df['close'], timeperiod=10)
+    df['sma_50'] = talib.SMA(df['close'], timeperiod=50)
+    df['sma_200'] = talib.SMA(df['close'], timeperiod=200)
+    df['s10_s50'] = ((df['sma_10'].shift(1) <= df['sma_50'].shift(1)) & (df['sma_10'] > df['sma_50'])).astype(int)
+    df['s50_s200'] = ((df['sma_50'].shift(1) <= df['sma_200'].shift(1)) & (df['sma_50'] > df['sma_200'])).astype(int)
+    df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+    df['stoch_k'], df['stoch_d'] = talib.STOCH(df['high'], df['low'], df['close'], fastk_period=14, slowk_period=3, slowd_period=3)
+    df['upper_band'], df['middle_band'], df['lower_band'] = talib.BBANDS(df['close'], timeperiod=20)
+    df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
+    df['cci'] = talib.CCI(df['high'], df['low'], df['close'], timeperiod=14)
+    df['macd_signal_cut'] = ((df['macd'].shift(1) <= df['macd_signal'].shift(1)) & (df['macd'] > df['macd_signal'])).astype(int)
+    df['macd_0230'] = ((df['macd'] <= -0.2) & (df['stoch_k'] <= 30)).astype(int)
+    df['macd_0270'] = ((df['macd'] >= 0.2) & (df['stoch_k'] >= 70)).astype(int)
+    df = df.dropna().reset_index(drop=True)  # Loại bỏ dòng có NaN
+    return df
+    
+df = df.groupby('ticker', group_keys=False).apply(compute_indicators)
+df = df.reset_index(drop=True)
+
+# 🛑 3. Loại bỏ dữ liệu không cần thiết + Sắp xếp theo thời gian
+df = df[(df['time'] >= '2020-01-01') & (df['time'] <= '2025-01-01')]
+df = df.sort_values(by="time") 
+
+# 🛑 4. Tạo biến target DỰ ĐOÁN 5 ngày sau
+df['target'] = ((df['close'].shift(-5) / df['close']) > 1.05).astype(int)
+
+# 🛑 5. Chia train/val (KHÔNG TÍNH TOÁN LẠI FEATURE)
+# Xác định ngưỡng thời gian để cắt train và val
+split_date = "2024-01-01"  # VD: Train từ 2020-2022, Val từ 2023 trở đi
+
+# Tạo train và val dựa trên thời gian
+train_data = df[df['time'] < split_date].copy()
+val_data = df[df['time'] >= split_date].copy()
+
+
+# 🛑 6. Lấy feature và target
+features = ['rsi', 'macd', 'macd_signal', 'sma_50', 'sma_10', 'sma_200', 'atr', 
+            'stoch_k', 'stoch_d', 'middle_band', 'adx', 'cci', 
+            'upper_band', 'lower_band', 'volume', 'high', 'low', 
+            's10_s50', 's50_s200','macd_signal_cut','macd_0230','macd_0270','close']
+
+
+
+X_train, y_train = train_data[features], train_data['target']
+X_val, y_val = val_data[features], val_data['target']
+
+def check_data_leakage(X_train, X_val):
+    # Kiểm tra trùng lặp
+    duplicates = X_train.index.intersection(X_val.index)
+    if len(duplicates) > 0:
+        print(f"⚠️ Cảnh báo: Có {len(duplicates)} điểm dữ liệu bị trùng giữa tập train và validation!")
+    else:
+        print("✅ Không có dữ liệu trùng lặp giữa train và validation.")
+    
+    # Kiểm tra xem có dữ liệu tương lai xuất hiện trong train không
+    train_dates = df.loc[X_train.index, 'time']
+    val_dates = df.loc[X_val.index, 'time']
+    if train_dates.max() >= val_dates.min():
+        print("⚠️ Cảnh báo: Dữ liệu train có chứa thời gian vượt qua tập validation!")
+    else:
+        print("✅ Không có dữ liệu tương lai bị lẫn vào train.")
+        
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)  
+X_val_scaled = scaler.transform(X_val)  
+
+
+def xgb_evaluate(max_depth, min_child_weight,n_estimators, gamma, learning_rate, subsample, colsample_bytree, reg_lambda, alpha, scale_pos_weight):
+    params = {
+        'objective': 'binary:logistic',
+        'max_depth': int(max_depth),
+        'min_child_weight': min_child_weight,
+        'n_estimators': int(n_estimators), 
+        'gamma': gamma,
+        'learning_rate': learning_rate,
+        'subsample': subsample,
+        'colsample_bytree': colsample_bytree,
+        'reg_lambda': reg_lambda,
+        'alpha': alpha,
+        'scale_pos_weight': scale_pos_weight,
+        'eval_metric': 'logloss'
+    }
+    model = xgb.XGBClassifier(**params, early_stopping_rounds=30)
+    model.fit(X_train_scaled, y_train, eval_set=[(X_val_scaled, y_val)], verbose=False)
+    y_pred_proba = model.predict_proba(X_val_scaled)[:, 1]
+    logloss_value = log_loss(y_val, y_pred_proba)
+    return -logloss_value
+
+optimizer = BayesianOptimization(
+    f=xgb_evaluate,
+    pbounds={
+        'max_depth': (30, 100),
+        'min_child_weight': (4, 6),
+        'n_estimators': (10, 1000),
+        'gamma': (0, 0.05),
+        'learning_rate': (0.001, 0.035),
+        'subsample': (0.7, 1.0),
+        'colsample_bytree': (0.5, 1.0),
+        'reg_lambda': (5, 29),
+        'alpha': (6, 30),
+        'scale_pos_weight': (2.5, 3)
+    },
+    random_state=42
+)
+optimizer.maximize(init_points=5, n_iter=30)
+
+best_params = optimizer.max['params']
+best_params['max_depth'] = int(best_params['max_depth'])
+best_params['n_estimators'] = int(best_params['n_estimators'])
+print(best_params)
+
+final_model = xgb.XGBClassifier(**best_params, objective='binary:logistic',early_stopping_rounds=10,  eval_metric='logloss')
+final_model.fit(X_train_scaled, y_train, eval_set=[(X_train_scaled, y_train), (X_val_scaled, y_val)], verbose=True)
+
+y_pred_proba = final_model.predict_proba(X_val_scaled)[:, 1]
+y_train_proba = final_model.predict_proba(X_train_scaled)[:, 1]
+
+# Dự đoán nhãn (0 hoặc 1) bằng cách chọn threshold = 0.5
+y_pred = (y_pred_proba >= 0.8).astype(int)
+
+
+# Tạo confusion matrix
+cm = confusion_matrix(y_val, y_pred)
+print (cm)
+
+
+# Tạo báo cáo đánh giá
+report = classification_report(y_val, y_pred, digits=4)
+print (report)
+
+logloss_value_val = log_loss(y_val, y_pred_proba)
+logloss_value_train = log_loss(y_train, y_train_proba)
+
+print(f"Validation Logloss: {logloss_value_val:.4f}")
+print(f"Training Logloss: {logloss_value_train:.4f}")
+    
+
+evals_result = final_model.evals_result()
+plt.figure(figsize=(10, 5))
+plt.plot(evals_result['validation_0']['logloss'], label='Train Logloss', color='blue')
+plt.plot(evals_result['validation_1']['logloss'], label='Validation Logloss', color='red')
+plt.xlabel('Iterations')
+plt.ylabel('Logloss')
+plt.title('Train vs Validation Logloss')
+plt.legend()
+plt.show()
