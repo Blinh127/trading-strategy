@@ -1,4 +1,4 @@
-# ĐẢM BẢO KHÔNG DATA LEAKAGE, CHIA TỆP DỮ LIỆU, CHẠY XGBOOST KHÁI QUÁT CHO TOÀN BỘ CỔ PHIẾU 
+
 
 import vnstock
 import pandas as pd
