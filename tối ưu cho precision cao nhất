@@ -1,0 +1,16 @@
+from sklearn.metrics import precision_recall_curve
+
+# Tính toán precision, recall và ngưỡng
+precision, recall, thresholds = precision_recall_curve(y_val, y_pred_proba)
+
+# Vẽ Precision-Recall curve
+plt.plot(recall, precision, marker='.')
+plt.xlabel('Recall')
+plt.ylabel('Precision')
+plt.title('Precision-Recall curve')
+plt.show()
+
+# Chọn ngưỡng sao cho precision được tối ưu
+# Ví dụ chọn ngưỡng có precision cao
+optimal_threshold = thresholds[np.argmax(precision)]
+print(f"Optimal Threshold for Maximum Precision: {optimal_threshold}")
